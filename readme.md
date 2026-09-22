@@ -1,34 +1,41 @@
 # AKS LocalDNS (Managed)
 
-AKS LocalDNS is a feature that deploys a DNS proxy and cache as a systemd service (`localdns.service`) on each cluster node, enabling distributed resolution of queries from pods to reduce network hops and improve performance. It integrates with CoreDNS for internal cluster domains and VNet DNS for external ones, offering customizable caching, forwarding policies, and protocol controls like forcing TCP to enhance reliability. This addresses common issues in large or high-traffic clusters, such as DNS latency, conntrack table exhaustion, uneven load on centralized CoreDNS pods, and resolution failures during upstream outages, resulting in up to 10x faster queries and better scalability.
+AKS LocalDNS runs a DNS proxy and cache as a systemd service (`localdns.service`) on each node. It reduces query latency and conntrack pressure, forwards Kubernetes service queries to CoreDNS, and supports caching, stale responses, logging, and forwarding controls.
+
+AKS Automatic includes LocalDNS preconfigured. This repository demonstrates explicit LocalDNS configuration on AKS Standard node pools. Starting with Kubernetes 1.37, eligible AKS Standard node pools without an explicit profile default to `Preferred` mode and can enable LocalDNS after compatibility checks.
+
+## Prerequisites
+
+- Azure CLI 2.80.0 or later. The `aks-preview` extension and `LocalDNSPreview` feature registration are no longer required.
+- Kubernetes 1.31 or later.
+- Azure Linux or Ubuntu 22.04 and later node images.
+- A node VM SKU with at least 4 vCPUs.
+- If the VNet uses custom DNS servers, both UDP and TCP port 53 must work from the AKS node subnet. Test both transports before enabling LocalDNS.
+- Do not run upstream Kubernetes NodeLocal DNSCache on the same node pool.
+
+Updating a LocalDNS profile on an existing node pool reimages every node in that pool. Plan for temporary node unavailability and use workload replicas and pod disruption budgets for production rollouts.
 
 ## Quickstart
 
-Update the preview extension and add the flag:
-
-```powershell
-az extension update --name aks-preview
-az feature register --namespace "Microsoft.ContainerService" --name "LocalDNSPreview"
-az provider register --namespace Microsoft.ContainerService
-```
-
-Invoke [setup.ps1](./setup.ps1) to create the cluster and enable LocalDNS on both the system and a new user node pool. The script will apply a default `--localdns-config` configuration file in [dnsconfig.json](./dnsconfig.json). You may adjust this as needed.
+Invoke [setup.ps1](./setup.ps1) to create an AKS Standard cluster and enable LocalDNS on the system pool and a new user pool. The script uses 4-vCPU Ubuntu 22.04 nodes and applies the Microsoft-documented default configuration from [dnsconfig.json](./dnsconfig.json) in `Required` mode. It isn't intended to update an existing deployment.
 
 ```powershell
 # invoke setup
 .\setup.ps1
 ```
 
+`Required` mode fails the node-pool operation if LocalDNS prerequisites aren't met. Microsoft recommends first validating custom configurations with `Preferred` mode before changing them to `Required`. On Kubernetes 1.31 through 1.36, `Preferred` validates the configuration without enabling LocalDNS; on 1.37 and later, it enables LocalDNS only after compatibility checks pass. Applying either mode to an existing pool can trigger a reimage.
+
 ## Verification
 
-Once configured, verify that queries from pods are resolving using the LocalDNS instance running on the link-local IP 169.254.10.10 or 169.254.10.11. 
+Once configured, verify that queries from pods use the LocalDNS instance on link-local IP `169.254.10.10` or `169.254.10.11`.
 
 ```powershell
 # test resolution and forwarding to coredns
 kubectl run netshoot --image=nicolaka/netshoot -it --rm --restart=Never -- nslookup metrics-server.kube-system.svc.cluster.local
 ```
 
-The output from the last command should indicate that the DNS request was handled by the link-local DNS IP and the `metrics-server.kube-system` domain has resolved to the correct service IP. 
+The `Server` field should contain one of the LocalDNS link-local IPs, and the service name should resolve to its cluster IP.
 
 ```powershell
 ;; Got recursion not available from 169.254.10.11
@@ -43,16 +50,15 @@ Address: 10.0.129.12
 pod "netshoot" deleted
 ```
 
-### Upstream DNS Verification
+### CoreDNS Forwarding Verification
 
-In addition, you should also verify that CoreDNS has handled the forwarded request from the Local DNS.
+To verify that LocalDNS forwards `cluster.local` requests to CoreDNS:
 
 1. Edit the `coredns-custom` config map to output log entries to the console.
 
     ```yaml
-    # added to coredns-custom
     data:
-    logs.override: |
+      logs.override: |
         log
     ```
 
@@ -64,12 +70,12 @@ In addition, you should also verify that CoreDNS has handled the forwarded reque
 
 3. Open a second console window and output the logs from CoreDNS.
 
-    ````powershell
+    ```powershell
     # view live logs for coredns
     kubectl logs -l k8s-app=kube-dns -n kube-system -f
-    ````
+    ```
 
-4. Invoke the `nslookup` command from above and observe that the request to "metrics-server.kube-system.svc.cluster.local" are handled by CoreDNS.
+4. Run the `nslookup` command again and observe that CoreDNS handles the `metrics-server.kube-system.svc.cluster.local` request.
 
     ```powershell
     # test resolution and forwarding to coredns
@@ -95,7 +101,9 @@ systemctl status localdns.service
 journalctl -u localdns.service -n 100
 ```
 
-## Links
-- [DNS Resolution in Azure Kubernetes Service (AKS)](https://learn.microsoft.com/en-us/azure/aks/dns-concepts#localdns-in-azure-kubernetes-service-preview)
-- [Configure LocalDNS in Azure Kubernetes Service (Preview)](https://learn.microsoft.com/en-us/azure/aks/localdns-custom)
+## References
+
+- [DNS Resolution in Azure Kubernetes Service (AKS)](https://learn.microsoft.com/azure/aks/dns-concepts)
+- [Configure LocalDNS in Azure Kubernetes Service (AKS)](https://learn.microsoft.com/azure/aks/localdns-custom)
+- [Azure CLI `az aks nodepool` reference](https://learn.microsoft.com/cli/azure/aks/nodepool)
 - [Accelerate DNS Performance with LocalDNS](https://blog.aks.azure.com/2025/08/04/accelerate-dns-performance-with-localdns)
